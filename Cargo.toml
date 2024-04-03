@@ -1,0 +1,26 @@
+[package]
+name = "leptosaurus"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+leptos = { version = "0.6.10", features = ["csr", "nightly"] }
+console_error_panic_hook = "0.1"
+console_log = "1"
+log = "0.4"
+leptos_router = { version = "0.6.10", features = ["csr"] }
+leptos-use = "0.10.3"
+web-sys = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
+futures = "0.3.30"
+
+shv = { git = "https://github.com/silicon-heaven/shv-rs.git", branch = "master" }
+#shv = { path = "../shv-rs" }
+url = "2.5.0"
+
+[dev-dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-test = "0.3.0"
+
