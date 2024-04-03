@@ -10,6 +10,7 @@ leptos = { version = "0.6.10", features = ["csr", "nightly"] }
 console_error_panic_hook = "0.1"
 console_log = "1"
 log = "0.4"
+leptos_meta = { version = "0.6.10", features = ["csr"] }
 leptos_router = { version = "0.6.10", features = ["csr"] }
 leptos-use = "0.10.3"
 web-sys = "0.3"
@@ -19,6 +20,7 @@ futures = "0.3.30"
 shv = { git = "https://github.com/silicon-heaven/shv-rs.git", branch = "master" }
 #shv = { path = "../shv-rs" }
 url = "2.5.0"
+thiserror = "1.0.58"
 
 [dev-dependencies]
 wasm-bindgen = "0.2"
