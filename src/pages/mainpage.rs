@@ -16,15 +16,15 @@ pub fn MainPage() -> impl IntoView {
     let (is_socket_connected, set_socket_connected) = create_signal(false);
 
     let input_url: NodeRef<html::Input> = create_node_ref();
-    let (url_str, set_url_str) = create_signal(String::from("wss://nirvana.elektroline.cz:37778"));
+    let url_str = create_rw_signal(String::from("wss://nirvana.elektroline.cz:37778"));
     let query = use_query_map();
     create_effect(move |_| {
         query.with(|q| {
             let qs = q.to_query_string();
             if qs.is_empty() {
-                set_url_str.update(|url: &mut String| { url.push_str("/?user=test&password=test"); })
+                url_str.update(|url: &mut String| { url.push_str("/?user=test&password=test"); })
             } else {
-                set_url_str.update(|url: &mut String| {
+                url_str.update(|url: &mut String| {
                     url.push('/');
                     url.push_str(&qs);
                 })
