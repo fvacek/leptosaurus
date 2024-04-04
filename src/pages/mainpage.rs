@@ -36,15 +36,14 @@ pub fn MainPage() -> impl IntoView {
             <h2>"Leptosaurus"</h2>
             <p>Leptos + websocket + SHV playground</p>
             // <p>{url_str}</p>
-            <div style="display: flex; flex-direction: row; align-items: center;">
+            <div style="display: flex; flex-direction: row; align-items: center; gap: 1em;">
                 <label for="url-str">"Url"</label>
-                "\u{00A0}" // &nbsp; doesn't work
                 <div style="flex-grow:100">
                     <input type="text" style="width:100%" prop:value=url_str node_ref=input_url/>
                 </div>
             </div>
             <hr/>
-            <div style="display: flex; flex-direction: row; align-items: center;">
+            <div style="display: flex; flex-direction: row; align-items: center; gap: 1em;">
                 <span>"socket connected: " {move || is_socket_connected.get()}</span>
                 <button on:click=move|_| set_connect.set(true) disabled=Signal::derive(move|| is_connect.get())>"Connect"</button>
                 <button on:click=move|_| set_connect.set(false) disabled=Signal::derive(move|| !is_connect.get())>"Disconnect"</button>
