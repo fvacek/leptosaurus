@@ -1,3 +1,5 @@
+use std::pin::Pin;
+use futures::{Stream, StreamExt};
 use crate::web_sys::CloseEvent;
 use leptos::ev::Event;
 use leptos::*;
@@ -6,7 +8,7 @@ use leptos_use::core::ConnectionReadyState;
 use leptos_use::{use_websocket_with_options, UseWebSocketOptions};
 use shv::client::LoginParams;
 use shv::util::{login_from_url, sha1_password_hash};
-use shv::RpcMessage;
+use shv::{RpcMessage, RpcMessageMetaTags, RpcValue};
 use url::Url;
 
 #[component]
@@ -44,12 +46,12 @@ pub fn MainPage() -> impl IntoView {
             </div>
             <hr/>
             <div style="display: flex; flex-direction: row; align-items: center; gap: 1em;">
-                <span>"socket connected: " {move || is_socket_connected.get()}</span>
+                <span>"socket connected: " {move || is_socket_connected}</span>
                 <button on:click=move|_| set_connect.set(true) disabled=Signal::derive(move|| is_connect.get())>"Connect"</button>
                 <button on:click=move|_| set_connect.set(false) disabled=Signal::derive(move|| !is_connect.get())>"Disconnect"</button>
             </div>
             <hr/>
-            {move || if is_connect.get() {
+            {move || if is_connect() {
                 let url_str = url_str.get_untracked();
                 view! {
                     <Wss url=url_str socket_connected=set_socket_connected />
@@ -60,22 +62,13 @@ pub fn MainPage() -> impl IntoView {
         </div>
     }
 }
-
 #[component]
 fn Wss(
     #[prop(into)] url: String,
     #[prop(into)] socket_connected: WriteSignal<bool>,
 ) -> impl IntoView {
     let (log, set_log) = create_signal(vec![]);
-    #[derive(Clone)]
-    enum LoginStatus {
-        Connected,
-        Hello,
-        Login,
-        Ok,
-        Error,
-    }
-    let (login_status, set_login_status) = create_signal(LoginStatus::Connected);
+    let (ws_connected, set_ws_connected) = create_signal(false);
 
     fn append_log(log: &WriteSignal<Vec<String>>, message: String) {
         let _ = log.update(|log: &mut Vec<_>| log.push(message));
@@ -83,14 +76,20 @@ fn Wss(
 
     let on_open_callback = move |e: Event| {
         set_log.update(|log: &mut Vec<_>| log.push(format! {"[onopen]: event {:?}", e.type_()}));
+        socket_connected.set(true);
+        set_ws_connected(true);
     };
 
     let on_close_callback = move |e: CloseEvent| {
         set_log.update(|log: &mut Vec<_>| log.push(format! {"[onclose]: event {:?}", e.type_()}));
+        socket_connected.set(false);
+        set_ws_connected(false);
     };
 
     let on_error_callback = move |e: Event| {
         set_log.update(|log: &mut Vec<_>| log.push(format! {"[onerror]: event {:?}", e.type_()}));
+        socket_connected.set(false);
+        set_ws_connected(false);
     };
 
     //let on_message_callback = move |m: String| {
@@ -114,33 +113,116 @@ fn Wss(
             .on_error(on_error_callback.clone()), //.on_message(on_message_callback.clone())
                                                   //.on_message_bytes(on_message_bytes_callback.clone()),
     );
-    let url = Url::parse(&url).expect("valid url");
-
-    let send_byte_message = move |bytes: Vec<u8>| {
-        //append_log(&set_log, format! {"[send_bytes]: {:?}", &bytes});
-        (ws.send_bytes)(bytes);
-    };
-    let send_request = move |rq: shv::RpcMessage| {
-        append_log(&set_log, format! {"[request]: {}", rq.to_cpon()});
+    //let (broker_connected, set_broker_connected) = create_signal(false);
+    let (message_to_send, set_message_to_send) = create_signal(RpcMessage::default());
+    let (received_message, set_received_message) = create_signal(RpcMessage::default());
+    create_effect(move |_| {
+        if let Some(data) = ws.message_bytes.get() {
+            let frame = shv::streamrw::read_frame(&data).expect("valid response frame");
+            let rpc_msg = frame.to_rpcmesage().expect("valid response message");
+            // append_log(&set_log, format! {"[message_bytes]: {:?}", &data});
+            append_log(&set_log, format! {"[received]: {}", rpc_msg.to_cpon()});
+            set_received_message(rpc_msg);
+        };
+    });
+    create_effect(move |_| {
+        let rq = message_to_send();
+        if rq.request_id().is_none() {
+            return;
+        }
+        append_log(&set_log, format! {"[sent]: {}", rq.to_cpon()});
         let frame = rq.to_frame().expect("valid hello message");
         let mut buff: Vec<u8> = vec![];
-        shv::streamrw::write_frame(&mut buff, frame).expect("valid hello frame");
-        send_byte_message(buff);
-    };
+        shv::streamrw::write_frame(&mut buff, frame).expect("valid frame");
+        (ws.send_bytes)(buff);
+    });
+    let url = Url::parse(&url).expect("valid url");
+    let (user, password) = login_from_url(&url);
+    let login_resource = create_resource(
+        ws_connected,
+ move|is_connected| {
+            let user = user.clone();
+            let password = password.clone();
+            async move {
+                if !is_connected {
+                    return Err("Not web socket is not connected.".to_string())
+                }
+                let mut receive_stream = received_message.to_stream();
+                async fn call_method(shv_path: &str, method: &str, param: Option<RpcValue>,
+                                     send: WriteSignal<RpcMessage>,
+                                     receive_stream: &mut Pin<Box<dyn Stream<Item=RpcMessage>>>) -> Result<RpcValue, String>
+                {
+                    let rq = RpcMessage::new_request(shv_path, method, param);
+                    let rq_id = rq.request_id().unwrap_or_default();
+                    send(rq);
+                    //set_login_status.set(crate::pages::mainpage::LoginStatus::Login);
+                    while let Some(msg) = receive_stream.next().await {
+                        if msg.request_id().unwrap_or_default() == rq_id {
+                            match msg.result() {
+                                Ok(val) => { return Ok(val.clone()) }
+                                Err(err) => { return Err(err.to_string()) }
+                            }
+                        }
+                        //return Err("Unexpected end of stream".to_string());
+                    };
+                    Err("NP".to_string())
+                }
 
-    let send_request2 = send_request.clone();
-    let call_method = move |shv_path: &str, method: &str, param: &str| {
-        let param = if param.is_empty() {
-            None
-        } else {
-            match shv::RpcValue::from_cpon(param) {
-                Ok(rv) => Some(rv),
-                Err(_) => None,
+                let result = match call_method("","hello", None, set_message_to_send, &mut receive_stream).await {
+                    Ok(v) => { v }
+                    Err(e) => { return Err(e) }
+                };
+                let nonce = result
+                    .as_map()
+                    .get("nonce")
+                    .expect("nonce")
+                    .as_str();
+                let hash = sha1_password_hash(password.as_bytes(), nonce.as_bytes());
+                let hashed_password = std::str::from_utf8(&hash).expect("ascii7 string").into();
+                let login_params = LoginParams {
+                    user,
+                    password: hashed_password,
+                    reset_session: false,
+                    ..Default::default()
+                };
+                match call_method("","login", Some(login_params.to_rpcvalue()), set_message_to_send, &mut receive_stream).await {
+                    Ok(_) => { Ok(()) }
+                    Err(e) => { Err(e) }
+                }
             }
-        };
-        let rq = RpcMessage::new_request(shv_path, method, param);
-        send_request2(rq);
-    };
+        }
+    );
+    #[derive(Clone, PartialEq)]
+    struct RpcCall {
+        shv_path: String,
+        method: String,
+        param: String,
+    }
+    let (method_call, set_method_call) = create_signal(RpcCall {
+        shv_path: "".to_string(),
+        method: "".to_string(),
+        param: "".to_string(),
+    });
+    let call_method_resource = create_resource(
+        method_call,
+        move |params| async move {
+            let param = if params.param.is_empty() {
+                None
+            } else {
+                Some(RpcValue::from_cpon(&params.param).expect("Valid cpon"))
+            };
+            let rq = RpcMessage::new_request(&params.shv_path, &params.method, param);
+            let rq_id = rq.request_id().expect("request id");
+            set_message_to_send(rq);
+            let mut stream = received_message.to_stream();
+            while let Some(msg) = stream.next().await {
+                if msg.request_id().unwrap_or_default() == rq_id {
+                    return msg;
+                }
+            }
+            return RpcMessage::default()
+        }
+    );
 
     let status = move || ws.ready_state.get().to_string();
 
@@ -152,62 +234,6 @@ fn Wss(
 
     let connected = move || ws.ready_state.get() == ConnectionReadyState::Open;
 
-    let send_request2 = send_request.clone();
-    create_effect(move |_| {
-        let sc = connected();
-        socket_connected.set(sc);
-        if sc {
-            // send hello
-            let rq = shv::RpcMessage::new_request("", "hello", None);
-            send_request2(rq);
-            set_login_status.set(LoginStatus::Hello);
-        }
-    });
-
-    create_effect(move |_| {
-        if let Some(data) = ws.message_bytes.get() {
-            let frame = shv::streamrw::read_frame(&data).expect("valid response frame");
-            let resp = frame.to_rpcmesage().expect("valid response message");
-            // append_log(&set_log, format! {"[message_bytes]: {:?}", &data});
-            append_log(&set_log, format! {"[response]: {}", resp.to_cpon()});
-            match login_status.get() {
-                LoginStatus::Hello => {
-                    let nonce = resp
-                        .result()
-                        .expect("valid hello response")
-                        .as_map()
-                        .get("nonce")
-                        .expect("nonce")
-                        .as_str();
-                    let (user, password) = login_from_url(&url);
-                    let hash = sha1_password_hash(password.as_bytes(), nonce.as_bytes());
-                    let password = std::str::from_utf8(&hash).expect("ascii7 string").into();
-                    let login_params = LoginParams {
-                        user,
-                        password,
-                        reset_session: false,
-                        ..Default::default()
-                    };
-                    let rq = RpcMessage::new_request("", "login", Some(login_params.to_rpcvalue()));
-                    send_request(rq);
-                    set_login_status.set(LoginStatus::Login);
-                }
-                LoginStatus::Login => match resp.result() {
-                    Ok(_) => {
-                        set_login_status.set(LoginStatus::Ok);
-                        append_log(&set_log, format! {"[login OK]"});
-                    }
-                    Err(err) => {
-                        set_login_status.set(LoginStatus::Error);
-                        append_log(&set_log, format! {"[login error]: {}", err.to_string()});
-                    }
-                },
-                LoginStatus::Ok => {}
-                _ => {}
-            }
-        };
-    });
-
     let input_shvpath: NodeRef<html::Input> = create_node_ref();
     let input_method: NodeRef<html::Input> = create_node_ref();
     let input_param: NodeRef<html::Input> = create_node_ref();
@@ -217,24 +243,44 @@ fn Wss(
             <div>
                 <h2>"Websocket"</h2>
                 <p>"status: " {status}</p>
-                "shv path"
-                <input type="text" size="50" value="" node_ref=input_shvpath/>
-                "method"
-                <input type="text" value="dir" node_ref=input_method/>
-                "param"
-                <input type="text" value="" node_ref=input_param/>
+                {move || match login_resource.get() {
+                    None => view! { <p>"Broker login in process ..."</p> }.into_view(),
+                    Some(Ok(())) => view! {
+                        <div style="display: flex; flex-direction: row; align-items: center; gap: 1em;">
+                            "shv path"
+                            <input type="text" size="50" value="" node_ref=input_shvpath/>
+                            "method"
+                            <input type="text" value="dir" node_ref=input_method/>
+                            "param"
+                            <input type="text" value="" node_ref=input_param/>
 
-                <button
-                    on:click= move |_| {
-                        call_method(&input_shvpath.get().unwrap().value(), &input_method.get().unwrap().value(), &input_param.get().unwrap().value());
-                    }
-                    disabled=move || !connected()
-                >
-                    "Send"
-                </button>
-                //<button on:click=send_byte_message disabled=move || !connected()>
-                //    "Send Bytes"
-                //</button>
+                            <button
+                                on:click= move |_| {
+                                    set_method_call(RpcCall{
+                                        shv_path: input_shvpath.get().unwrap().value(),
+                                        method: input_method.get().unwrap().value(),
+                                        param: input_param.get().unwrap().value(),
+                                    });
+                                }
+                                disabled=move || !connected()
+                            >
+                                "Send"
+                            </button>
+                        </div>
+                        <h3>"Result"</h3>
+                        <textarea id="result" name="result" rows="5" cols="80">
+                            {move || {
+                                call_method_resource().map(|val| {
+                                    match val.result() {
+                                        Ok(val) => { val.to_cpon_indented("  ") }
+                                        Err(err) => { err.to_string() }
+                                    }
+                                })
+                            }}
+                        </textarea>
+                    }.into_view(),
+                    Some(Err(err)) => view! { <p>"Login error " {err}</p> }.into_view(),
+                }}
                 <div>
                     <h3>"Log"</h3>
                     <button
